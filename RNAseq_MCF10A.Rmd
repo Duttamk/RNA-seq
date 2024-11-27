@@ -1,0 +1,222 @@
+---
+title: "RNAseq_MCF10A"
+author: "Mainak Dutta"
+date: "2024-02-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+
+
+
+
+```{r Loading Packages}
+library('dplyr')
+library('DESeq2')
+library('ggplot2')
+library('gridExtra')
+library('EnhancedVolcano')
+library('clusterProfiler')
+library('org.Hs.eg.db')
+library('AnnotationDbi')
+
+```
+
+
+
+```{r Loading Dataset}
+
+# Setting the working directory path
+setwd("E:/COGIT")
+
+counts_data = read.delim("COGIT_rnaseq-raw_counts.tsv")
+
+# Convert into a dataframe excluding GSK and GSK+HU columns
+counts_data=as.data.frame(counts_data[-c(4, 5, 6, 7)])
+
+head(counts_data)
+```
+
+
+## PRE-PROCESSING
+
+```{r Preprocessing}
+
+# Making gene_ids as row names
+rownames(counts_data) = counts_data$gene_id
+counts_data = counts_data[-1]
+
+# Forming a new dataframe with condition info
+col_data = as.factor(c('untreated', 'untreated', 'treated', 'treated'))
+col_data = as.data.frame(col_data)
+
+# Assigning rownames as the samples and columns as condition
+rownames(col_data) = colnames(counts_data)
+colnames(col_data) = c('HU')
+
+
+head(col_data)
+```
+
+
+
+```{r Checking data congruence}
+
+# Checking whether all the sample info is present in both the dataframes in the correct order
+all(colnames(counts_data) %in% row.names(col_data))
+all(colnames(counts_data) == row.names(col_data))
+
+```
+
+
+### FILTERING
+
+```{r Filtering}
+
+# Filtering out rows with less than 10 reads across all samples
+counts_data = counts_data[which(rowSums(counts_data) >= 10), ]
+dim.data.frame(counts_data)
+
+```
+
+
+## DIFFERENTIAL EXPRESSION ANALYSIS
+
+```{r DESeq2 Object}
+
+dds <- DESeqDataSetFromMatrix(countData = counts_data, 
+                              colData = col_data,
+                              design = ~ HU)
+```
+
+
+
+```{r Normalization}
+
+# Generate size factors
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+
+# Retrieve the normalized counts
+normalized_counts <- counts(dds, normalized=TRUE)
+head(normalized_counts)
+```
+
+### PCA
+
+```{r Principal Component Analysis (PCA)}
+
+# Variance Stabilizing Transformation
+vsdata = vst(dds, blind = FALSE)
+
+# PCA plot
+pca = plotPCA(vsdata, ntop = 1000, intgroup = 'HU')
+pca + coord_cartesian(ylim=c(-5, 5)) + ggtitle("PCA: Sample Separation Between Conditions") + labs(colour = "Conditions")
+```
+
+
+
+```{r Relevelling}
+
+dds$HU = relevel(dds$HU, ref = 'untreated')
+dds$HU
+```
+
+
+```{r Differential Expression Analysis}
+dds = DESeq(dds)
+res = results(dds, alpha = 0.05)
+res
+
+summary(res)
+```
+
+### VOLCANO PLOT
+
+```{r Volcano Plot, fig.dim=c(8, 6)}
+
+# Create new dataframe to retrieve gene symbols
+allgenes = res@rownames
+allgenes = mapIds(org.Hs.eg.db, keys = allgenes, keytype = "ENSEMBL", column = "SYMBOL")
+allgenes = as.data.frame(allgenes)
+colnames(allgenes) = "gene_symbl"
+
+# Copy DESeq statistics to new dataframe  
+allgenes$log2FC = res$log2FoldChange
+allgenes$padj = res$padj
+head(allgenes)
+
+vol = EnhancedVolcano(allgenes, lab = allgenes$gene_symbl, x = 'log2FC', y = 'padj',
+                      ylim = c(0, 300), xlim = c(-10, 10), axisLabSize = 10,
+                      pCutoff = 0.05, FCcutoff = 1,
+                      pointSize = 1, labSize = 4.0, 
+                      legendLabels = c('Not Significant', 'Log2-FC', 'p-value', 'padj & Log2-FC'),
+                      legendLabSize = 12, legendIconSize = 4.0, legendPosition = 'right',
+                      titleLabSize = 12, subtitle = NULL)
+vol
+```
+
+
+```{r Filter genes}
+
+res = as.data.frame(res)
+
+# Segregating upregulated and downregulated genes
+upreg = res[which(res$padj<0.05 & res$log2FoldChange>=1),]
+downreg = res[which(res$padj<0.05 & res$log2FoldChange<=(-1)),]
+
+# Verifying the up and down-regulated genes
+x = c(max(upreg['padj'])<0.05, min(upreg['log2FoldChange'])>=1,
+      max(downreg['padj'])<0.05, min(downreg['log2FoldChange'])<=(-1))
+x
+```
+
+
+## PATHWAY ANALYSIS
+
+```{r Pathway Analysis}
+
+
+up_genes = row.names(upreg)
+down_genes = row.names(downreg)
+
+# Retrieving GO 
+GO_res_upreg = enrichGO(gene = up_genes, OrgDb = "org.Hs.eg.db", keyType = 'ENSEMBL', ont = 'BP')
+GO_res_downreg = enrichGO(gene = down_genes, OrgDb = "org.Hs.eg.db", keyType = 'ENSEMBL', ont = 'BP')
+
+```
+
+
+
+```{r Plot, fig.dim=c(8, 6)}
+
+# Plotting Pathways affected by upregulated genes
+p1 = barplot(GO_res_upreg, showCategory = 20)
+p1 + scale_y_discrete(guide = guide_axis(check.overlap = TRUE)) + ggtitle("Pathways Upreg")
+
+# Plotting Pathways affected by downregulated genes
+p2 = barplot(GO_res_downreg, showCategory = 20)
+p2 + scale_y_discrete(guide = guide_axis(check.overlap = TRUE)) + ggtitle("Pathways Downreg")
+
+```
+```{r Exporting Gene Info}
+
+
+up_genes = as.data.frame(up_genes)
+colnames(up_genes) = "geneIDs"
+
+up_genes = mapIds(org.Hs.eg.db, keys = up_genes$geneIDs, keytype = "ENSEMBL", column = "SYMBOL")
+up_genes = as.data.frame(up_genes)
+colnames(up_genes) = "Gene_SYMBL"
+
+up_genes$GeneIDs = row.names(up_genes)
+rownames(up_genes) = seq(1:length(rownames(up_genes)))
+
+# write in a csv file
+write.csv2(up_genes, file = "E:/COGIT/upreg_RNAseq.csv", row.names = FALSE)
+
+```
+
